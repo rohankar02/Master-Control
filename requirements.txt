@@ -1,0 +1,6 @@
+sqlalchemy
+pyserial
+mysql-connector-python-rf
+mysql-python
+observable
+https://github.com/pika/pika/tarball/master#egg=pika-master
