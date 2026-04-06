@@ -1,132 +1,123 @@
 import logging
+import os
 import threading
 import time
-import os
-import sys
-from serial import Serial
 from datetime import datetime, timedelta
+from typing import Any, Callable, List, Optional
+
+from serial import Serial
+
 from mcp.plugins import plugins
 
-logger = None
-thread = None
-serial = None
-obs = None
+# Module-level state
+logger: Optional[logging.Logger] = None
+monitor_thread: Optional[threading.Thread] = None
+serial_connection: Optional[Serial] = None
+obs: Any = None
 
-CMD_START = '\xFE'
-CMD_END = '\xFF'
+# Hardware protocol constants
+CMD_START = b'\xFE'
+CMD_END = b'\xFF'
 
-HEARTBEAT_STATUS_DELTA = timedelta(seconds=15) # How often to poll for status
-HEARTBEAT_FAILURE_DELTA = timedelta(seconds=120) # When a device is considered broken
+HEARTBEAT_STATUS_DELTA = timedelta(seconds=15)
+HEARTBEAT_FAILURE_DELTA = timedelta(seconds=120)
 
-callables = []
+callables: List[Callable] = []
 
-# TODO: Configurable? (should pull from DB)
 class Host:
-    address = 17
-    is_active = False # assume not active to avoid health checks
-    last_status_request = datetime.min
-    last_status = datetime.min
+    """Represents a hardware transceiver at a specific address."""
+    address: int = 17
+    is_active: bool = False
+    last_status_request: datetime = datetime.min
+    last_status: datetime = datetime.min
 
-    def __init__(self, serial):
-        self._serial = serial
+    def __init__(self, serial_inst: Serial):
+        self._serial = serial_inst
 
-    def admit_access(self, doorNum):
-        self._serial.write([CMD_START, ord('A'), doorNum, ord('A')^doorNum, CMD_END])
+    def admit_access(self, door_num: int) -> None:
+        """Sends an access granted command to the device."""
+        checksum = ord('A') ^ door_num
+        payload = bytes([ord(CMD_START), ord('A'), door_num, checksum, ord(CMD_END)])
+        self._serial.write(payload)
 
-hosts = []
+hosts: List[Host] = []
 
-def init(config, obsMain):
-    global thread
-    global logger
-    global serial
-    global obs
+def init(config: Any, obs_main: Any) -> None:
+    """Initialize the serial polling engine."""
+    global monitor_thread, logger, serial_connection, obs
     logger = logging.getLogger(__name__)
-    obs = obsMain
+    obs = obs_main
 
-    portName = config.get('serial', 'port')
-    baudRate = config.get('serial', 'baud')
+    port = config.get('serial', 'port')
+    baud = config.getint('serial', 'baud')
+    timeout = config.getint('serial', 'timeout', fallback=1)
 
-    logger.info("Initializing serial monitor (%s @ %s baud)" % (portName, baudRate))
-    serial = Serial(portName, baudRate, timeout=config.getint('serial', 'timeout'))
+    logger.info(f"Connecting to hardware via serial ({port} @ {baud} baud)")
+    serial_connection = Serial(port, baud, timeout=timeout)
 
-    # TODO: Configurable?
-    hosts.append(Host(serial))
-    load_commands(config, obsMain)
+    hosts.append(Host(serial_connection))
+    _load_serial_plugins(config, obs_main)
 
-    thread = threading.Thread(target=watch_serial, args=[])
-    thread.daemon = True
-    thread.start()
+    monitor_thread = threading.Thread(target=watch_serial, daemon=True)
+    monitor_thread.start()
 
-def load_commands(config, obsMain):
-    logger.info("Loading serial commands")
-
-    dev_plugins = plugins.get_plugins(os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'devices'), 'plugins.devices.')
+def _load_serial_plugins(config: Any, obs_main: Any) -> None:
+    """Discovers and configures device plugins."""
+    logger.info("Scanning for device interaction plugins...")
+    plugin_path = os.path.join(os.path.dirname(__file__), '..', '..', 'plugins', 'devices')
+    dev_plugins = plugins.get_plugins(plugin_path, 'mcp.plugins.devices')
+    
     for plugin in dev_plugins:
-        if (hasattr(plugin, 'configure')):
-            plugin.configure(config, obsMain)
-        for func in plugin.__dict__.values():
-            if (hasattr(func, 'command') and hasattr(func, '__call__')):
-                callables.append(func)
+        if hasattr(plugin, 'configure'):
+            plugin.configure(config, obs_main)
+        for name, value in plugin.__dict__.items():
+            if hasattr(value, 'command') and callable(value):
+                callables.append(value)
 
-def watch_serial():
-    logger.info("Starting serial monitor thread")
+def watch_serial() -> None:
+    """Main background loop monitoring the serial bus."""
+    logger.info("Serial monitor loop active.")
+    if not serial_connection: return
+
     while True:
         for host in hosts:
             try:
-                # Delay at start so each attempt begins with waiting to ensure devices
-                # have a delay between attempted reads
                 time.sleep(0.1)
+                now = datetime.now()
+                
+                if (now - host.last_status > HEARTBEAT_STATUS_DELTA):
+                    if (now - host.last_status_request > HEARTBEAT_STATUS_DELTA):
+                        host.last_status_request = now
+                        serial_connection.write(CMD_START + b'SS' + CMD_END)
 
-                # If status has not been recently received, request status
-                if (datetime.now() - host.last_status > HEARTBEAT_STATUS_DELTA):
-                    # If we've request status recently, wait before requesting against
-                    if(datetime.now() - host.last_status_request > HEARTBEAT_STATUS_DELTA):
-                        host.last_status_request = datetime.now()
-                        logger.debug("Sending heartbeat to address: %s" % host.address)
-                        serial.write([CMD_START, ord('S'), ord('S'), CMD_END])
+                line = serial_connection.readline()
+                if line:
+                    _process_hardware_line(host, line)
 
-                cmd = serial.readline()
-                try:
-                    cmdStart = cmd.index(CMD_START)
-
-                    # First byte should be a command start: Assume no command if not
-                    if (cmdStart != 0): continue
-
-                    cmdLine = bytearray(cmd[cmdStart + 1 : cmd.index(CMD_END)]).decode('utf-8')
-
-                    logger.debug("Read command: %s" % cmdLine)
-
-                    cmdArgs = cmdLine.split(',')
-
-                    cmdArg = cmdArgs[0]
-                    cmdProcessed = False
-
-                    for func in callables:
-                        try:
-                            if (cmdArg == func.command):
-                                func(host, cmdLine, cmdArgs)
-                                cmdProcessed = True
-                        except Exception as e:
-                            logger.error("Error calling plugin for command %s" % cmdLine, exc_info=True)
-
-                    if not cmdProcessed:
-                        logger.error("Invalid command (%s): unknown command type" % cmdLine)
-                except ValueError as e:
-                    pass # no command found
-                except Exception as e:
-                    logger.error("Error processing command (%s)" % str(bytearray(cmd)), exc_info=True)
-
-
-                # If device status has not been received by failure threshold, log and notify.
-                # Process this after running commands so we don't assume a device is broken when it is
-                # responding slowly to ping requests.
-                if (datetime.now() - host.last_status > HEARTBEAT_FAILURE_DELTA):
-                    logger.error("MasterControl RFID communications down! Device: %s" % host.address)
-                    obs.trigger('device_down', host)
+                if (now - host.last_status > HEARTBEAT_FAILURE_DELTA):
+                    if host.is_active:
+                        logger.error(f"Hardware at address {host.address} unreachable.")
+                        obs.trigger('device_down', host)
                     host.is_active = False
-                    host.last_status = datetime.now() - HEARTBEAT_STATUS_DELTA # prevents notifification spam
-            except IOError as e:
-                pass
-            except Exception as e:
-                logger.error("Error reading command", exc_info=True)
+                    host.last_status = now - HEARTBEAT_STATUS_DELTA + timedelta(seconds=60)
+            except Exception:
+                logger.error("Hardware communication error", exc_info=True)
                 time.sleep(5)
+
+def _process_hardware_line(host: Host, data: bytes) -> None:
+    """Parses and routes raw bytes from hardware to plugin callbacks."""
+    try:
+        start_idx = data.find(CMD_START)
+        end_idx = data.find(CMD_END)
+        if start_idx == -1 or end_idx == -1: return
+
+        command_body = data[start_idx + 1:end_idx].decode('utf-8', errors='ignore').strip()
+        args = command_body.split(',')
+        if not args: return
+            
+        cmd_type = args[0]
+        for callback in callables:
+            if getattr(callback, 'command', None) == cmd_type:
+                callback(host, command_body, args)
+    except Exception as e:
+        logger.error(f"Data processing failure: {e}")
