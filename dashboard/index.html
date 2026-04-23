@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Master Control Access Logs</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background: #2b3e50; color: white; padding: 40px; }
+        .dashboard { max-width: 900px; margin: 0 auto; }
+        .chart-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 30px; margin-top: 40px; }
+        .box { background: #34495e; padding: 20px; border-radius: 5px; }
+        h1 { border-bottom: 2px solid #1abc9c; padding-bottom: 10px; }
+    </style>
+</head>
+<body>
+    <div class="dashboard">
+        <h1>IoT Access System Monitoring</h1>
+        <div class="chart-grid">
+            <div class="box">
+                <h4>Entries per Day</h4>
+                <canvas id="logChart"></canvas>
+            </div>
+            <div class="box">
+                <h4>Pass vs Fail</h4>
+                <canvas id="statusChart"></canvas>
+            </div>
+        </div>
+    </div>
+    <script>
+        const logCtx = document.getElementById('logChart').getContext('2d');
+        new Chart(logCtx, {
+            type: 'line',
+            data: {
+                labels: ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'],
+                datasets: [{ label: 'Total Accesses', data: [12, 19, 3, 5, 20], borderColor: '#1abc9c', backgroundColor: 'rgba(26, 188, 156, 0.2)', fill: true }]
+            }
+        });
+
+        const statusCtx = document.getElementById('statusChart').getContext('2d');
+        new Chart(statusCtx, {
+            type: 'pie',
+            data: {
+                labels: ['Authorized', 'Unauthorized'],
+                datasets: [{ data: [45, 8], backgroundColor: ['#27ae60', '#e74c3c'] }]
+            }
+        });
+    </script>
+</body>
+</html>

@@ -30,15 +30,20 @@ def setup_logging() -> None:
         logging.basicConfig(level=logging.INFO)
 
 def signal_handler(sig: int, frame: Any) -> NoReturn:
-    """Graceful shutdown on interrupt."""
+    """
+    This function handles when you press Ctrl+C to stop the program.
+    It prints a message and closes the program safely.
+    """
     print("\n^C received - shutting down Master Control...")
     sys.exit(0)
 
 def main() -> None:
-    """Application entry point."""
+    """
+    This is where the program starts running.
+    """
     print("--- Master Control System v2.0 Starting ---")
     
-    # Load configuration
+    # 1. We load our configuration file to get settings
     config = configparser.ConfigParser()
     config_path = "config/mastercontrol.ini"
     
@@ -49,12 +54,12 @@ def main() -> None:
         
     config.read(config_path)
     
-    # Initialize logging
+    # 2. Setup our logger so we can track what happens
     setup_logging()
     logger = logging.getLogger(__name__)
     logger.info("Starting Master Control System...")
 
-    # Register signal handlers
+    # 3. Tell the computer what to do when we stop the program
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
